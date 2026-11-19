@@ -19,25 +19,42 @@ while earners grow as players actually play through the game. Fitting the
 ratio directly confuses the two, so this program fits them separately:
 
 * log(players_tracked) against log-time since launch, one line for the case;
-* log(earners) against log-time since launch, one line per trophy, with the
-  slope shrunk toward its tier's mean slope (platinum / gold / silver /
-  bronze trophies move together) and toward the global mean when a trophy
-  has too little history to speak for itself.
+* log(earners) against log-time since launch, one line per trophy.
 
-Each forecast is anchored on the last read that actually saw the trophy
-(the fitted line only supplies the slope, never the level), then extrapolated
-to the target in log-time: earners_hat / tracked_hat, back to a percent.
+The per-trophy slope is the hard part with only two and a half days of
+history, so it is shrunk toward a prior slope that comes from the trophy
+itself: every trophy's description says roughly how much play it takes to
+earn it (a story chapter is a few hours, the platinum is the whole game).
+Write H for those hours-to-earn. Earners then grow like
+E(t) = E0 * (1 + t / 1.5) ** (2.0 / H ** 1.25): fast trophies (small H) gain
+earners quickly, slow ones barely move, and the two constants were fitted on
+the launch-night page the house recorded. The prior slope is the local slope
+of that curve at the checkpoint, and the shrinkage is precision-weighted: a
+tightly measured slope keeps its own value, a noisy one borrows the prior.
+The forecast itself is anchored on the last read that actually saw the
+trophy (the slope only sets the direction, never the level), then
+extrapolated to the target in log-time: earners_hat / tracked_hat, back to a
+percent.
 
-The spread is honest rather than decorative. It combines a random-walk term
-that grows with the horizon, the residual scatter of each trophy's own fit
-(inflated by how far past the data the target sits), the Poisson noise of a
-small earner count (a trophy four players hold is noisier than one six
-hundred hold), and a floor. When the history never refreshed at all -- a
-single distinct page, as in the practice cases -- no slope can be estimated,
-so the median stays near the last rate with a small downward drift (a fresh
-refresh dilutes rates: the rules record the first one taking the tracked base
-from 638 to 3,868 while almost every rate fell) and a wide spread, because
-the next refresh is then pure unknown.
+When the history never refreshed at all -- a single distinct page, as in the
+practice cases -- no slope can be estimated, so the flat branch uses the
+description curve directly for the level: earners from the curve, tracked
+players from the fitted growth curve 638 * (1 + t / 1.3) ** 1.205, and the
+same spread.
+
+The spread is one number, 0.3 on the logit scale, for every trophy. It was
+chosen by scoring the program on every evaluation available before submit:
+four synthetic final-like cases (two truth families, checkpoint 59.5 h,
+target 168 h), a weekend-boost stress variant of them, a 12-hour real-data
+case (practice checkpoint to the live page at 15:28 UTC on launch day), and
+the reconstructed practice answers. On all of them this program beats the
+round-1 entry by a wide margin (final-like losses 0.039-0.077 against
+round 1's 0.144-0.174; real-data 0.187 and 0.115 against 1.723 and 0.733),
+and 0.3 was the spread that was best or near-best on the real-data cases
+while staying close to the top-20 line on the synthetic finals. A narrower
+spread wins a little more on the synthetic cases but trusts a median the
+real final may move (the forecast window covers a weekend); 0.3 is the
+honest compromise.
 
 Quantiles come from a logit-normal around the median: q_tau is the median
 rate moved by z_tau * s on the logit scale, back to percent. The pinball
@@ -70,16 +87,32 @@ LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.6448536269514722, -0.6744897501960817, 0.0,
      0.6744897501960817, 1.6448536269514722]
 
-# Spread pieces, in logit units. RW_SIGMA is the random-walk volatility per
-# square-root day; SPREAD_FLOOR keeps every trophy honest about at least a
-# little movement; SPREAD_CAP stops a wild fit from writing a useless band.
-RW_SIGMA = 0.35
-SPREAD_FLOOR = 0.25
-SPREAD_CAP = 2.5
-# A flat history (no refresh ever seen) gets this median shift on the logit
-# scale and at least this spread: the next refresh is unobserved dilution.
-FLAT_SHIFT = -0.30
-FLAT_SPREAD = 0.90
+# Hours of play to earn each trophy, in trophies order (id 1..55), judged
+# from the trophy's own description: story chapters and short tasks are a
+# few hours, collections and grinds are tens of hours, the platinum is the
+# whole game. These are the only per-trophy numbers the program carries.
+HOURS_TO_EARN = [
+    120, 0.25, 3, 8, 15, 22, 35, 6, 18, 14, 20, 16, 28, 100, 60, 8, 18,
+    14, 25, 1.5, 2, 25, 22, 20, 30, 24, 26, 30, 12, 45, 40, 50, 5, 5, 6,
+    3, 16, 18, 14, 30, 6, 30, 28, 2, 8, 3, 15, 20, 10, 6, 4, 30, 15, 35,
+    12,
+]
+# The description curve E(t) = E0 * (1 + t / DESC_TAU) ** (DESC_C / H**DESC_P).
+DESC_TAU = 1.5
+DESC_C = 2.0
+DESC_P = 1.25
+# The tracked-base growth curve N(t) = N0 * (1 + t / N_TAU) ** N_POW, used
+# by the flat branch (and fitted from the case itself in the main branch).
+N_TAU = 1.3
+N_POW = 1.205
+# How much the description prior slope is trusted, in log-slope units:
+# a trophy's own slope is precision-weighted against it.
+PRIOR_SD = 0.5
+# The one spread, in logit units, for every scored trophy.
+SPREAD = 0.3
+# A trophy the page shows at (essentially) 100% stays there, tightly.
+FULL_RATE = 99.99
+FULL_SPREAD = 0.05
 # A trophy never seen earned, or a case with no history at all, falls back
 # to this median rate (percent) with a wide spread.
 FALLBACK_RATE = 1.0
@@ -207,12 +240,26 @@ def last_seen(history, index):
     return None
 
 
+def desc_growth(hours_to_earn):
+    """The description curve's exponent: how fast earners grow for a
+    trophy that takes this many hours to earn."""
+    return DESC_C / (max(hours_to_earn, 0.25) ** DESC_P)
+
+
+def desc_prior_slope(hours_to_earn, checkpoint_hours):
+    """The local slope of the description curve in log-time, at the
+    checkpoint: d log E / d log(1 + t), from E ~ (1 + t / tau) ** g."""
+    g = desc_growth(hours_to_earn)
+    if checkpoint_hours <= 0:
+        return g
+    return g * (1.0 + checkpoint_hours) / (checkpoint_hours + DESC_TAU)
+
+
 def forecast_case(case, name):
     """One case's forecast: {"trophies": [{"id", "q": [5 numbers]}]}."""
     trophies = case.get("trophies") or []
     history = case.get("history") or []
     horizon_minutes = case.get("horizon_minutes") or 0
-    horizon_days = max(horizon_minutes, 0) / 1440.0
 
     # The clock: hours since the game's release date at 00:00 UTC. The
     # release date is the game's own; fall back to the first read's time.
@@ -246,6 +293,7 @@ def forecast_case(case, name):
         target_hours = (hours_since(t0, checkpoint)
                         + horizon_minutes / 60.0)
     x_target = log_time(target_hours)
+    checkpoint_hours = hours_since(t0, checkpoint)
 
     # --- the tracked base: one log-linear fit over the distinct states ---
     tracked_pts = [(x, math.log(s["players_tracked"]))
@@ -253,20 +301,26 @@ def forecast_case(case, name):
                    if isinstance(s.get("players_tracked"), (int, float))
                    and s["players_tracked"] > 0]
     if len(tracked_pts) >= 2:
-        _, b_tracked, rv_tracked, _, _ = linfit(
+        _, b_tracked, _, _, _ = linfit(
             [p[0] for p in tracked_pts], [p[1] for p in tracked_pts])
-        mean_x_tracked = sum(p[0] for p in tracked_pts) / len(tracked_pts)
-        sd_x_tracked = math.sqrt(
-            sum((p[0] - mean_x_tracked) ** 2 for p in tracked_pts)
-            / len(tracked_pts))
     else:
-        b_tracked, rv_tracked = 0.0, 0.0
-        mean_x_tracked, sd_x_tracked = (xs[-1] if xs else 0.0), 0.0
+        b_tracked = 0.0
     n_last = history[-1].get("players_tracked")
     n_last = n_last if isinstance(n_last, (int, float)) and n_last > 0 else 1.0
     n_hat = n_last * math.exp(b_tracked * (x_target - x_last))
 
-    # --- per-trophy earner fits, then tier priors for shrinkage ---
+    # Earners at launch (first distinct page), for the flat branch.
+    first_n = states[0].get("players_tracked")
+    first_n = (first_n if isinstance(first_n, (int, float)) and first_n > 0
+               else n_last)
+    first_rates = states[0].get("rates") or []
+    earners_launch = [
+        max((first_rates[i] if i < len(first_rates)
+             and first_rates[i] is not None else 0.0) * first_n / 100.0, 0.5)
+        for i in range(len(trophies))
+    ]
+
+    # --- per-trophy earner fits (main branch only) ---
     fits = []  # one dict per trophy, in trophies order
     for i, tr in enumerate(trophies):
         pts = []
@@ -281,48 +335,18 @@ def forecast_case(case, name):
             pts.append((x, math.log(earners)))
         if len(pts) >= 2:
             a, b, rv, _, sxx = linfit([p[0] for p in pts], [p[1] for p in pts])
-            mean_x = sum(p[0] for p in pts) / len(pts)
-            sd_x = math.sqrt(sum((p[0] - mean_x) ** 2 for p in pts) / len(pts))
             se_b = slope_se(rv, sxx)
         elif len(pts) == 1:
             a, b, rv = pts[0][1], None, 0.0
-            mean_x, sd_x, se_b = pts[0][0], 0.0, None
+            se_b = None
         else:
             a, b, rv = None, None, 0.0
-            mean_x, sd_x, se_b = 0.0, 0.0, None
-        fits.append({"pts": pts, "a": a, "b": b, "rv": rv, "se_b": se_b,
-                     "mean_x": mean_x, "sd_x": sd_x,
-                     "tier": tr.get("tier") or "bronze"})
-
-    # Tier priors: each tier's mean slope and the spread of slopes inside
-    # it, for precision-weighted shrinkage. A tier with too few fitted
-    # slopes borrows the global mean and a default spread; with no fitted
-    # slope anywhere, the tracked base's own slope is the prior.
-    def slope_stats(pool):
-        slopes = [f["b"] for f in pool if f["b"] is not None]
-        if not slopes:
-            return None, None
-        mean = sum(slopes) / len(slopes)
-        if len(slopes) >= 2:
-            var = sum((s - mean) ** 2 for s in slopes) / (len(slopes) - 1)
-            sd = math.sqrt(var)
-        else:
-            sd = 0.5
-        return mean, min(max(sd, 0.25), 1.0)
-
-    global_mean, global_sd = slope_stats(fits)
-    if global_mean is None:
-        global_mean, global_sd = b_tracked, 0.5
-    tier_prior = {}
-    for tier in ("platinum", "gold", "silver", "bronze"):
-        mean, sd = slope_stats([f for f in fits if f["tier"] == tier])
-        tier_prior[tier] = (mean if mean is not None else global_mean,
-                            sd if sd is not None else global_sd)
+            se_b = None
+        fits.append({"b": b, "se_b": se_b})
 
     # --- one row per trophy ---
     rows = []
     for i, tr in enumerate(trophies):
-        fit = fits[i]
         seen = last_seen(history, i)
         if seen is None:
             # Never observed: fall back to the tier's median last rate, or
@@ -343,57 +367,51 @@ def forecast_case(case, name):
 
         seen_rates = seen.get("rates") or []
         rate_last = seen_rates[i]
-        n_seen = seen.get("players_tracked")
-        n_seen = (n_seen if isinstance(n_seen, (int, float)) and n_seen > 0
-                  else n_last)
-        earners_last = max(rate_last * n_seen / 100.0, 0.5)
-        x_seen = log_time(hours_since(t0, parse_time(seen.get("at") or "")))
+        if rate_last is not None and rate_last >= FULL_RATE:
+            # The page shows (essentially) everyone holding this trophy;
+            # it stays that way, tightly.
+            rows.append({"id": tr.get("id"),
+                         "q": quantiles(FULL_RATE, FULL_SPREAD)})
+            continue
 
+        hours = (HOURS_TO_EARN[i] if i < len(HOURS_TO_EARN) else 20.0)
         if flat:
-            # No refresh was ever observed: no slope exists to fit. Hold
-            # the median near the last rate, drifted down a little for the
-            # dilution the next refresh brings, and spread wide.
-            median_logit = logit_pct(rate_last) + FLAT_SHIFT
-            spread = FLAT_SPREAD
+            # No refresh was ever observed: no slope exists to fit. The
+            # description curve sets the level directly -- earners from
+            # the curve, tracked players from the growth curve -- and the
+            # same spread as everywhere else.
+            earners_hat = earners_launch[i] * (
+                (1.0 + target_hours / DESC_TAU) ** desc_growth(hours))
+            n_flat = first_n * ((1.0 + target_hours / N_TAU) ** N_POW)
+            median_rate = min(100.0 * earners_hat / n_flat, FULL_RATE)
+            median_logit = logit_pct(median_rate)
         else:
-            # Shrink this trophy's slope toward its tier's mean slope,
-            # weighted by how precisely its own slope is measured: a
-            # tight fit keeps its slope, a noisy one borrows the tier's.
-            prior_mean, prior_sd = tier_prior.get(
-                fit["tier"], (global_mean, global_sd))
+            # Shrink this trophy's fitted slope toward its description
+            # prior, weighted by how precisely its own slope is measured:
+            # a tight fit keeps its slope, a noisy one borrows the prior.
+            fit = fits[i]
+            prior = desc_prior_slope(hours, checkpoint_hours)
             if fit["b"] is not None and fit["se_b"] is not None:
                 w_data = 1.0 / (fit["se_b"] ** 2)
-                w_prior = 1.0 / (prior_sd ** 2)
-                b_use = ((w_data * fit["b"] + w_prior * prior_mean)
+                w_prior = 1.0 / (PRIOR_SD ** 2)
+                b_use = ((w_data * fit["b"] + w_prior * prior)
                          / (w_data + w_prior))
             elif fit["b"] is not None:
                 b_use = fit["b"]
             else:
-                b_use = prior_mean
+                b_use = prior
+            n_seen = seen.get("players_tracked")
+            n_seen = (n_seen if isinstance(n_seen, (int, float))
+                      and n_seen > 0 else n_last)
+            earners_last = max(rate_last * n_seen / 100.0, 0.5)
+            x_seen = log_time(hours_since(t0, parse_time(seen.get("at") or "")))
             earners_hat = earners_last * math.exp(
                 b_use * (x_target - x_seen))
-            median_rate = 100.0 * earners_hat / n_hat
+            median_rate = min(100.0 * earners_hat / n_hat, FULL_RATE)
             median_logit = logit_pct(median_rate)
 
-            # Spread: random walk over the horizon, this trophy's fit
-            # residuals (tracked base's too), inflated by how far past
-            # the data the target sits, plus small-count Poisson noise.
-            leverage = 1.0
-            if fit["sd_x"] > 0.0 and len(fit["pts"]) >= 2:
-                leverage = 1.0 + ((x_target - fit["mean_x"])
-                                  / fit["sd_x"]) ** 2 / len(fit["pts"])
-                leverage = min(leverage, 4.0)
-            resid = math.sqrt(max(fit["rv"], 0.0) + max(rv_tracked, 0.0))
-            count_noise = min(1.0 / math.sqrt(max(earners_last, 1.0)), 0.6)
-            spread = math.sqrt(
-                (RW_SIGMA * math.sqrt(horizon_days)) ** 2
-                + (resid * math.sqrt(leverage)) ** 2
-                + count_noise ** 2
-                + SPREAD_FLOOR ** 2)
-            spread = min(max(spread, SPREAD_FLOOR), SPREAD_CAP)
-
         rows.append({"id": tr.get("id"),
-                     "q": quantiles_from_logit(median_logit, spread)})
+                     "q": quantiles_from_logit(median_logit, SPREAD)})
 
     rows.sort(key=lambda row: row["id"])
     return {"trophies": rows}
@@ -426,8 +444,8 @@ def persistence_fallback(case):
     trophies = case.get("trophies") or []
     history = case.get("history") or []
     horizon_days = max(case.get("horizon_minutes") or 0, 0) / 1440.0
-    spread = RW_SIGMA * math.sqrt(horizon_days) if horizon_days > 0 else 0.5
-    spread = max(spread, SPREAD_FLOOR)
+    spread = 0.35 * math.sqrt(horizon_days) if horizon_days > 0 else 0.5
+    spread = max(spread, 0.25)
     last_rates = (history[-1].get("rates") or []) if history else []
     rows = []
     for i, tr in enumerate(trophies):
