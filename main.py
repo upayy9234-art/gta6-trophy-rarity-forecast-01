@@ -8,8 +8,8 @@ trophy. This program never writes anywhere except the output directory, never
 touches the clock or any randomness, so two runs on the same input are byte
 identical.
 
-The idea
---------
+The model, version 2
+--------------------
 An earn rate is a ratio: rate = earners / players_tracked. Exophase only
 refreshes its page every so often, so the history a case hands us is a step
 function: long flat stretches, then a jump. Both sides of the ratio move for
@@ -21,40 +21,62 @@ ratio directly confuses the two, so this program fits them separately:
 * log(players_tracked) against log-time since launch, one line for the case;
 * log(earners) against log-time since launch, one line per trophy.
 
-The per-trophy slope is the hard part with only two and a half days of
-history, so it is shrunk toward a prior slope that comes from the trophy
-itself: every trophy's description says roughly how much play it takes to
-earn it (a story chapter is a few hours, the platinum is the whole game).
-Write H for those hours-to-earn. Earners then grow like
-E(t) = E0 * (1 + t / 1.5) ** (2.0 / H ** 1.25): fast trophies (small H) gain
-earners quickly, slow ones barely move, and the two constants were fitted on
-the launch-night page the house recorded. The prior slope is the local slope
-of that curve at the checkpoint, and the shrinkage is precision-weighted: a
-tightly measured slope keeps its own value, a noisy one borrows the prior.
-The forecast itself is anchored on the last read that actually saw the
-trophy (the slope only sets the direction, never the level), then
-extrapolated to the target in log-time: earners_hat / tracked_hat, back to a
-percent.
+Round 2 did exactly this, with the per-trophy slope shrunk toward a prior
+slope from the trophy's own description. It scored well on power-law truths
+but overshot badly on saturating ones: when earners stop accelerating, a
+straight line fitted over the whole history keeps pointing up. Version 2
+adds two guards against that, both chosen per trophy from the history
+itself:
 
-When the history never refreshed at all -- a single distinct page, as in the
-practice cases -- no slope can be estimated, so the flat branch uses the
-description curve directly for the level: earners from the curve, tracked
-players from the fitted growth curve 638 * (1 + t / 1.3) ** 1.205, and the
-same spread.
+1. Curvature. A quadratic is fitted to log(earners) against log-time
+   alongside the line. Where the quadratic bends down, the slope used for
+   the extrapolation is the average of the line's slope and the quadratic's
+   implied secant slope to the target -- the recent, slower growth, not the
+   whole-history average. Where there is no bend, the two agree and nothing
+   changes.
 
-The spread is one number, 0.3 on the logit scale, for every trophy. It was
-chosen by scoring the program on every evaluation available before submit:
-four synthetic final-like cases (two truth families, checkpoint 59.5 h,
-target 168 h), a weekend-boost stress variant of them, a 12-hour real-data
-case (practice checkpoint to the live page at 15:28 UTC on launch day), and
-the reconstructed practice answers. On all of them this program beats the
-round-1 entry by a wide margin (final-like losses 0.039-0.077 against
-round 1's 0.144-0.174; real-data 0.187 and 0.115 against 1.723 and 0.733),
-and 0.3 was the spread that was best or near-best on the real-data cases
-while staying close to the top-20 line on the synthetic finals. A narrower
-spread wins a little more on the synthetic cases but trusts a median the
-real final may move (the forecast window covers a weekend); 0.3 is the
-honest compromise.
+2. A saturating rate model. The rate itself is fitted as
+   s(t) = A - B * exp(-t / tau), by a grid over tau with a linear solve for
+   A and B at each step, weighted by the tracked base. When that shape fits
+   the observed rates clearly better than the power-law forecast does
+   (residual sum of squares under 60% of the power law's), the median is
+   moved halfway, in logit space, toward the saturating model's target
+   rate. When it does not fit better, it is ignored entirely.
+
+The slope that comes out of step 1 is still shrunk toward the description
+prior, precision-weighted as in round 2: a tightly measured slope keeps its
+own value, a noisy one borrows the prior. The prior comes from the trophy's
+description -- every trophy says roughly how much play it takes to earn it
+(a story chapter is a few hours, the platinum is the whole game) -- through
+the curve E(t) = E0 * (1 + t / 1.5) ** (2.0 / H ** 1.25), with H the hours
+to earn and the two constants fitted on the launch-night page the house
+recorded. The forecast itself is anchored on the last read that actually
+saw the trophy (the slope only sets the direction, never the level), then
+extrapolated to the target in log-time: earners_hat / tracked_hat, back to
+a percent.
+
+When the history never refreshed at all -- a single distinct page, as in
+the practice cases -- no slope can be estimated, so the flat branch uses
+the description curve directly for the level: earners from the curve,
+tracked players from the fitted growth curve 638 * (1 + t / 1.3) ** 1.205,
+and a wider spread, because a level built from a description alone is a
+guess in a way a fitted slope is not.
+
+The spread is 0.08 on the logit scale for most trophies, and 0.05 for a
+trophy whose median sits at the 0.01% floor. It was chosen by scoring the
+program on every evaluation available before submit: six synthetic
+final-like cases from round 2 (two truth families, checkpoint 59.5 h,
+target 168 h), twelve fresh held-out cases (new seeds, a mixed family, a
+weekend-boost variant, a saturating-base variant, a wrong-prior variant),
+a 12-hour real-data case, and the reconstructed practice answers. On the
+eighteen final-like cases this program scores 0.024 on average against
+round 2's 0.052, and on round 2's own six cases 0.020 against 0.051; the
+saturating family, round 2's weak spot, improves from 0.074-0.077 to
+0.020-0.024. A narrower spread wins a little more on the synthetic cases,
+but the forecast window covers a weekend and the live round-2 entry scored
+about twice its synthetic average, so the spread is kept at the level that
+stays near-optimal when the median carries extra error, not the level that
+is best when the median is exactly right.
 
 Quantiles come from a logit-normal around the median: q_tau is the median
 rate moved by z_tau * s on the logit scale, back to percent. The pinball
@@ -108,8 +130,22 @@ N_POW = 1.205
 # How much the description prior slope is trusted, in log-slope units:
 # a trophy's own slope is precision-weighted against it.
 PRIOR_SD = 0.5
-# The one spread, in logit units, for every scored trophy.
-SPREAD = 0.3
+# How much of the quadratic secant slope replaces the line slope (0..1).
+QUAD_WEIGHT = 0.5
+# The saturating rate model: grid of time constants (hours) to try.
+SAT_TAUS = [15.0, 25.0, 40.0, 65.0, 100.0, 160.0, 250.0, 400.0, 650.0,
+            1000.0, 1600.0, 2500.0, 4000.0]
+# Blend toward the saturating model only when its in-sample residual sum
+# of squares is under this fraction of the power law's.
+SAT_RATIO = 0.6
+# How far, in logit space, the median moves toward the saturating model.
+SAT_ALPHA = 0.5
+# The spreads, in logit units: the main one, the one for a median pinned
+# at the 0.01% floor, and the one for the flat branch's description level.
+SPREAD = 0.08
+SPREAD_FLOOR = 0.05
+SPREAD_FLAT = 0.25
+FLOOR_RATE = 0.02
 # A trophy the page shows at (essentially) 100% stays there, tightly.
 FULL_RATE = 99.99
 FULL_SPREAD = 0.05
@@ -204,6 +240,49 @@ def linfit(xs, ys):
     return a, b, resid_var, n, sxx
 
 
+def quadfit(xs, ys):
+    """Least-squares quadratic y ~ a + b*x + c*x^2, solved by elimination.
+
+    Returns (a, b, c, resid_var, n), or None when there are too few points
+    or the system is singular. Only the slope terms are ever used: the
+    quadratic is a curvature detector, not a level estimator.
+    """
+    n = len(xs)
+    if n < 4:
+        return None
+    sums = [0.0] * 5  # sum x^k for k = 0..4
+    tots = [0.0] * 3  # sum x^k * y for k = 0..2
+    for x, y in zip(xs, ys):
+        power = 1.0
+        for k in range(5):
+            sums[k] += power
+            power *= x
+        power = 1.0
+        for k in range(3):
+            tots[k] += power * y
+            power *= x
+    rows = [[sums[0], sums[1], sums[2], tots[0]],
+            [sums[1], sums[2], sums[3], tots[1]],
+            [sums[2], sums[3], sums[4], tots[2]]]
+    for col in range(3):
+        pivot = max(range(col, 3), key=lambda r: abs(rows[r][col]))
+        if abs(rows[pivot][col]) < 1e-12:
+            return None
+        rows[col], rows[pivot] = rows[pivot], rows[col]
+        for r in range(col + 1, 3):
+            factor = rows[r][col] / rows[col][col]
+            for cc in range(col, 4):
+                rows[r][cc] -= factor * rows[col][cc]
+    coef = [0.0] * 3
+    for r in range(2, -1, -1):
+        coef[r] = (rows[r][3]
+                   - sum(rows[r][cc] * coef[cc] for cc in range(r + 1, 3))) / rows[r][r]
+    a, b, c = coef
+    resid_var = sum((y - (a + b * x + c * x * x)) ** 2
+                    for x, y in zip(xs, ys)) / (n - 3)
+    return a, b, c, resid_var, n
+
+
 def slope_se(resid_var, sxx):
     """Standard error of a fitted slope; None when it cannot be judged."""
     if sxx is None or sxx <= 0.0:
@@ -255,6 +334,69 @@ def desc_prior_slope(hours_to_earn, checkpoint_hours):
     return g * (1.0 + checkpoint_hours) / (checkpoint_hours + DESC_TAU)
 
 
+def saturating_rate(index, states, xs, e_last, x_seen, n_last, x_last,
+                    slope_use, slope_n, target_hours):
+    """Fit s(t) = A - B * exp(-t / tau) to this trophy's observed rates.
+
+    Returns (target_rate, sse_sat, sse_power) when the fit succeeds, else
+    None. The power law's residual is measured on the same states, from
+    the anchored earners and tracked lines, so the two shapes are judged
+    on the same evidence.
+    """
+    times = []
+    rates = []
+    weights = []
+    for x, state in zip(xs, states):
+        state_rates = state.get("rates") or []
+        if index >= len(state_rates) or state_rates[index] is None:
+            continue
+        n = state.get("players_tracked")
+        if not isinstance(n, (int, float)) or n <= 0:
+            continue
+        times.append(math.expm1(x))
+        rates.append(state_rates[index])
+        weights.append(float(n))
+    if len(times) < 4:
+        return None
+    best = None
+    for tau in SAT_TAUS:
+        us = [math.exp(-t / tau) for t in times]
+        total_w = sum(weights)
+        mean_u = sum(w * u for w, u in zip(weights, us)) / total_w
+        mean_s = sum(w * s for w, s in zip(weights, rates)) / total_w
+        suu = sum(w * (u - mean_u) ** 2 for w, u in zip(weights, us))
+        if suu <= 0.0:
+            continue
+        cov = sum(w * (u - mean_u) * (s - mean_s)
+                  for w, u, s in zip(weights, us, rates))
+        slope = cov / suu  # s = A - B*u, so this slope is -B
+        a_const = mean_s - slope * mean_u
+        b_const = -slope
+        if a_const <= 0.0:
+            continue
+        sse = sum(w * (s - (a_const - b_const * u)) ** 2
+                  for w, u, s in zip(weights, us, rates))
+        if best is None or sse < best[0]:
+            best = (sse, a_const, b_const, tau)
+    if best is None:
+        return None
+    sse_sat, a_const, b_const, tau = best
+    # The power law's implied rates at the same states, from the anchored
+    # lines the forecast itself uses.
+    log_e_last = math.log(e_last)
+    log_n_last = math.log(n_last)
+    sse_power = 0.0
+    for t, s, w in zip(times, rates, weights):
+        x = log_time(t)
+        pred = (100.0 * math.exp(log_e_last + slope_use * (x - x_seen))
+                / math.exp(log_n_last + slope_n * (x - x_last)))
+        sse_power += w * (s - pred) ** 2
+    target_rate = a_const - b_const * math.exp(-target_hours / tau)
+    if target_rate <= 0.0:
+        return None
+    return min(target_rate, FULL_RATE), sse_sat, sse_power
+
+
 def forecast_case(case, name):
     """One case's forecast: {"trophies": [{"id", "q": [5 numbers]}]}."""
     trophies = case.get("trophies") or []
@@ -296,6 +438,8 @@ def forecast_case(case, name):
     checkpoint_hours = hours_since(t0, checkpoint)
 
     # --- the tracked base: one log-linear fit over the distinct states ---
+    n_last = history[-1].get("players_tracked")
+    n_last = n_last if isinstance(n_last, (int, float)) and n_last > 0 else 1.0
     tracked_pts = [(x, math.log(s["players_tracked"]))
                    for x, s in zip(xs, states)
                    if isinstance(s.get("players_tracked"), (int, float))
@@ -305,8 +449,6 @@ def forecast_case(case, name):
             [p[0] for p in tracked_pts], [p[1] for p in tracked_pts])
     else:
         b_tracked = 0.0
-    n_last = history[-1].get("players_tracked")
-    n_last = n_last if isinstance(n_last, (int, float)) and n_last > 0 else 1.0
     n_hat = n_last * math.exp(b_tracked * (x_target - x_last))
 
     # Earners at launch (first distinct page), for the flat branch.
@@ -319,30 +461,6 @@ def forecast_case(case, name):
              and first_rates[i] is not None else 0.0) * first_n / 100.0, 0.5)
         for i in range(len(trophies))
     ]
-
-    # --- per-trophy earner fits (main branch only) ---
-    fits = []  # one dict per trophy, in trophies order
-    for i, tr in enumerate(trophies):
-        pts = []
-        for x, s in zip(xs, states):
-            rates = s.get("rates") or []
-            if i >= len(rates) or rates[i] is None:
-                continue
-            n = s.get("players_tracked")
-            if not isinstance(n, (int, float)) or n <= 0:
-                continue
-            earners = max(rates[i] * n / 100.0, 0.5)
-            pts.append((x, math.log(earners)))
-        if len(pts) >= 2:
-            a, b, rv, _, sxx = linfit([p[0] for p in pts], [p[1] for p in pts])
-            se_b = slope_se(rv, sxx)
-        elif len(pts) == 1:
-            a, b, rv = pts[0][1], None, 0.0
-            se_b = None
-        else:
-            a, b, rv = None, None, 0.0
-            se_b = None
-        fits.append({"b": b, "se_b": se_b})
 
     # --- one row per trophy ---
     rows = []
@@ -378,40 +496,86 @@ def forecast_case(case, name):
         if flat:
             # No refresh was ever observed: no slope exists to fit. The
             # description curve sets the level directly -- earners from
-            # the curve, tracked players from the growth curve -- and the
-            # same spread as everywhere else.
+            # the curve, tracked players from the growth curve -- and a
+            # wider spread, because a description-only level is a guess.
             earners_hat = earners_launch[i] * (
                 (1.0 + target_hours / DESC_TAU) ** desc_growth(hours))
             n_flat = first_n * ((1.0 + target_hours / N_TAU) ** N_POW)
             median_rate = min(100.0 * earners_hat / n_flat, FULL_RATE)
-            median_logit = logit_pct(median_rate)
-        else:
-            # Shrink this trophy's fitted slope toward its description
-            # prior, weighted by how precisely its own slope is measured:
-            # a tight fit keeps its slope, a noisy one borrows the prior.
-            fit = fits[i]
-            prior = desc_prior_slope(hours, checkpoint_hours)
-            if fit["b"] is not None and fit["se_b"] is not None:
-                w_data = 1.0 / (fit["se_b"] ** 2)
-                w_prior = 1.0 / (PRIOR_SD ** 2)
-                b_use = ((w_data * fit["b"] + w_prior * prior)
-                         / (w_data + w_prior))
-            elif fit["b"] is not None:
-                b_use = fit["b"]
-            else:
-                b_use = prior
-            n_seen = seen.get("players_tracked")
-            n_seen = (n_seen if isinstance(n_seen, (int, float))
-                      and n_seen > 0 else n_last)
-            earners_last = max(rate_last * n_seen / 100.0, 0.5)
-            x_seen = log_time(hours_since(t0, parse_time(seen.get("at") or "")))
-            earners_hat = earners_last * math.exp(
-                b_use * (x_target - x_seen))
-            median_rate = min(100.0 * earners_hat / n_hat, FULL_RATE)
-            median_logit = logit_pct(median_rate)
+            rows.append({"id": tr.get("id"),
+                         "q": quantiles_from_logit(
+                             logit_pct(median_rate), SPREAD_FLAT)})
+            continue
 
+        # Per-trophy log-earner fit over the distinct states.
+        pts = []
+        for x, s in zip(xs, states):
+            rates = s.get("rates") or []
+            if i >= len(rates) or rates[i] is None:
+                continue
+            n = s.get("players_tracked")
+            if not isinstance(n, (int, float)) or n <= 0:
+                continue
+            earners = max(rates[i] * n / 100.0, 0.5)
+            pts.append((x, math.log(earners)))
+        if len(pts) >= 2:
+            _, b_fit, rv, _, sxx = linfit(
+                [p[0] for p in pts], [p[1] for p in pts])
+            se_b = slope_se(rv, sxx)
+            # Bend check: where the quadratic bends down, the slope for
+            # the extrapolation is half line, half the quadratic's secant
+            # slope to the target -- recent growth, not the whole-history
+            # average. Where there is no bend, the two agree.
+            quad = quadfit([p[0] for p in pts], [p[1] for p in pts])
+            if quad is not None:
+                _, b_quad, c_quad, _, _ = quad
+                x_seen_tmp = log_time(hours_since(
+                    t0, parse_time(seen.get("at") or "")))
+                secant = b_quad + c_quad * (x_target + x_seen_tmp)
+                b_fit = ((1.0 - QUAD_WEIGHT) * b_fit
+                         + QUAD_WEIGHT * secant)
+        else:
+            b_fit, se_b = None, None
+
+        # Shrink the fitted slope toward its description prior, weighted
+        # by how precisely its own slope is measured.
+        prior = desc_prior_slope(hours, checkpoint_hours)
+        if b_fit is not None and se_b is not None:
+            w_data = 1.0 / (se_b ** 2)
+            w_prior = 1.0 / (PRIOR_SD ** 2)
+            b_use = ((w_data * b_fit + w_prior * prior)
+                     / (w_data + w_prior))
+        elif b_fit is not None:
+            b_use = b_fit
+        else:
+            b_use = prior
+
+        n_seen = seen.get("players_tracked")
+        n_seen = (n_seen if isinstance(n_seen, (int, float))
+                  and n_seen > 0 else n_last)
+        earners_last = max(rate_last * n_seen / 100.0, 0.5)
+        x_seen = log_time(hours_since(t0, parse_time(seen.get("at") or "")))
+        earners_hat = earners_last * math.exp(b_use * (x_target - x_seen))
+        median_rate = min(100.0 * earners_hat / n_hat, FULL_RATE)
+
+        # Saturating-rate guard: when the saturating shape fits the
+        # observed rates clearly better than the power law, move the
+        # median halfway toward it, in logit space.
+        if len(pts) >= 2:
+            sat = saturating_rate(
+                i, states, xs, earners_last, x_seen, n_last, x_last,
+                b_use, b_tracked, target_hours)
+            if sat is not None:
+                sat_rate, sse_sat, sse_power = sat
+                if sse_sat < SAT_RATIO * sse_power:
+                    median_rate = pct_from_logit(
+                        (1.0 - SAT_ALPHA) * logit_pct(median_rate)
+                        + SAT_ALPHA * logit_pct(sat_rate))
+
+        spread = SPREAD_FLOOR if median_rate <= FLOOR_RATE else SPREAD
         rows.append({"id": tr.get("id"),
-                     "q": quantiles_from_logit(median_logit, SPREAD)})
+                     "q": quantiles_from_logit(
+                         logit_pct(median_rate), spread)})
 
     rows.sort(key=lambda row: row["id"])
     return {"trophies": rows}
